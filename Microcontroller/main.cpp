@@ -24,7 +24,9 @@ const int SLP_PARIS_HPA = 1021; // SEA LEVEL PRESSURE Paris (hPa)
 TinyGPSPlus gps;
 SoftwareSerial gpsSerial(4, 3); // RX, TX
 
-bool isParachuteActive;
+bool contactState = false;
+bool isParachuteActive = false;
+int inactiveCounter = 0;
 
 String genFileName();
 
@@ -76,7 +78,21 @@ void setup() {
 
 void loop() {
   // PARACHUTE CHECK ------------------------------------------------------
-  isParachuteActive = (digitalRead(contact) == HIGH);
+  contactState = (digitalRead(contact) == HIGH);
+
+  if (contactState && !isParachuteActive) {
+    isParachuteActive = contactState;
+    inactiveCounter = 0;
+  }
+
+  if (!contactState && isParachuteActive) {
+    inactiveCounter++;
+  }
+
+  if (inactiveCounter >= 5) {
+    isParachuteActive = contactState;
+    inactiveCounter = 0;
+  }
 
   if (isParachuteActive) {
     digitalWrite(dataLED, HIGH);
