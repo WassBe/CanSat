@@ -6,37 +6,29 @@
 #include <TinyGPS++.h>
 #include <SoftwareSerial.h>
 
-// BASICS ---------------------------------------------------------------
+const byte masterLED = 2;
+const byte issueLED = 9;
+const byte dataLED = 6;
+const byte contact1 = 7;
+const byte contact2 = 8;
+const byte sdCard = 10;
 
-const int masterLED = 13;
-const int issueLED = 9;
-const int dataLED = 12;
-
-const int contact = 7;
-
-const int sdCard = 10;
-char fileName[24];
-int timeCounter = 0;
+uint16_t timeCounter = 0;
+const uint16_t SLP_PARIS_HPA = 1021;
 
 Adafruit_BME280 bme;
-const int SLP_PARIS_HPA = 1021; // SEA LEVEL PRESSURE Paris (hPa)
-
 TinyGPSPlus gps;
-SoftwareSerial gpsSerial(4, 3); // RX, TX
+SoftwareSerial gpsSerial(4, 3);
 
-bool contactState = false;
 bool isParachuteActive = false;
-int inactiveCounter = 0;
+byte inactiveCounter = 0;
 
-String genFileName();
-
-// FILE NAME ------------------------------------------------------------
-String genFileName() {
-  String hex = "";
-  for (int i = 0; i < 8; i++) {
-    hex += String(random(0, 16), HEX);
-  }
-  return hex;
+void writeFixed(File &f, float val) {
+  f.print((int)val);
+  f.print('.');
+  int dec = abs((int)(val * 100) % 100);
+  if (dec < 10) f.print('0');
+  f.print(dec);
 }
 
 void setup() {
@@ -44,101 +36,77 @@ void setup() {
   gpsSerial.begin(9600);
   randomSeed(analogRead(A0));
 
-  // SETUP LEDS -----------------------------------------------------------
   pinMode(masterLED, OUTPUT);
-  pinMode(issueLED, OUTPUT);
-  pinMode(dataLED, OUTPUT);
+  pinMode(issueLED,  OUTPUT);
+  pinMode(dataLED,   OUTPUT);
+  pinMode(contact1,  OUTPUT);
+  pinMode(contact2,  INPUT_PULLUP);
 
-  pinMode(contact, INPUT_PULLUP);
-
+  digitalWrite(contact1,  LOW);
   digitalWrite(masterLED, HIGH);
+  digitalWrite(issueLED,  LOW);
+  digitalWrite(dataLED,   LOW);
+
+  while (!SD.begin(sdCard)) {
+    digitalWrite(issueLED, !digitalRead(issueLED));
+    Serial.println(F("ERROR: SD card not found, retrying..."));
+    delay(500);
+  }
   digitalWrite(issueLED, LOW);
-  digitalWrite(dataLED, LOW);
+  Serial.println(F("SD card initialized successfully."));
 
-  snprintf(fileName, sizeof(fileName), "record-%s.can", genFileName().c_str());
-
-  // SETUP SD -------------------------------------------------------------
-  if (SD.begin(sdCard)) {
-    Serial.println(F("SD card initialized successfully."));
-  } else {
-    digitalWrite(issueLED, HIGH);
-    Serial.println(F("ERROR: SD card initialization failed."));
-    while (true);
+  while (!bme.begin(0x76)) {
+    digitalWrite(issueLED, !digitalRead(issueLED));
+    Serial.println(F("ERROR: BME280 not found, retrying..."));
+    delay(500);
   }
-
-  // SETUP BME280 ---------------------------------------------------------
-  if (bme.begin(0x76)) {
-    Serial.println(F("Barometer ready."));
-  } else {
-    digitalWrite(issueLED, HIGH);
-    Serial.println(F("ERROR: BME280 module not found."));
-    while (true);
-  }
+  digitalWrite(issueLED, LOW);
+  Serial.println(F("Barometer ready."));
 }
 
 void loop() {
-  // PARACHUTE CHECK ------------------------------------------------------
-  contactState = (digitalRead(contact) == HIGH);
+  bool contactState = (digitalRead(contact2) == LOW);
 
-  if (contactState && !isParachuteActive) {
-    isParachuteActive = contactState;
-    inactiveCounter = 0;
-  }
-
-  if (!contactState && isParachuteActive) {
-    inactiveCounter++;
-  }
-
-  if (inactiveCounter >= 5) {
-    isParachuteActive = contactState;
-    inactiveCounter = 0;
-  }
+  if (contactState)  inactiveCounter = 0;
+  if (contactState  && !isParachuteActive) isParachuteActive = true;
+  if (!contactState &&  isParachuteActive) inactiveCounter++;
+  if (inactiveCounter >= 5) isParachuteActive = false;
 
   if (isParachuteActive) {
     digitalWrite(dataLED, HIGH);
 
-    // BAROMETER DATA ACQUISITION -----------------------------------------
     float temperature = bme.readTemperature();
     float humidity = bme.readHumidity();
     float pressure = bme.readPressure() / 100.0F;
-    float altitudeBaro = bme.readAltitude(SLP_PARIS_HPA);
+    float altitude = bme.readAltitude(SLP_PARIS_HPA);
 
-    // GPS DATA ACQUISITION -----------------------------------------------
-    while (gpsSerial.available()) {
-      gps.encode(gpsSerial.read());
+    while (gpsSerial.available()) gps.encode(gpsSerial.read());
+
+    double latitude  = gps.location.isValid() ? gps.location.lat()     : 0.0;
+    double longitude = gps.location.isValid() ? gps.location.lng()     : 0.0;
+    double altitudeGPS = gps.altitude.isValid()  ? gps.altitude.meters() : 0.0;
+
+    Serial.println(inactiveCounter);
+
+    File file = SD.open("data.txt", FILE_WRITE);
+    if (file) {
+      file.print(F("{\"time\":")); file.print(timeCounter);
+      file.print(F(",\"temperature\":")); writeFixed(file, temperature);
+      file.print(F(",\"humidity\":")); writeFixed(file, humidity);
+      file.print(F(",\"pressure\":")); writeFixed(file, pressure);
+      file.print(F(",\"altitude\":")); writeFixed(file, altitude);
+      file.print(F(",\"altitudeGPS\":")); writeFixed(file, (float)altitudeGPS);
+      file.print(F(",\"latitude\":")); file.print(latitude,  6);
+      file.print(F(",\"longitude\":")); file.print(longitude, 6);
+      file.println('}');
+      file.flush();
+      file.close();
+      Serial.println(F("Data write: OK"));
+    } else {
+      Serial.println(F("Data write: FAIL"));
     }
-
-    double latitude = gps.location.lat();
-    double longitude = gps.location.lng();
-    double altitudeGPS = gps.altitude.meters();
-
-    // FILE PREPARATION ---------------------------------------------------
-    float finalTemperature = temperature;
-    float finalHumidity = humidity;
-    float finalPressure = pressure;
-    float finalAltitude = (altitudeBaro + altitudeGPS) / 2;
-    double finalLatitude = latitude;
-    double finalLongitude = longitude;
-
-    char jsonRow[128];
-    snprintf(jsonRow, sizeof(jsonRow),
-      "{\"time\":%d,\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.2f,\"altitude\":%.2f,\"latitude\":%.6f,\"longitude\":%.6f}",
-      timeCounter, finalTemperature, finalHumidity, finalPressure, finalAltitude, finalLatitude, finalLongitude);
 
     timeCounter++;
-
-    File file = SD.open(fileName, O_WRITE | O_CREAT | O_APPEND);
-
-    // FILE CHECK AND WRITE -----------------------------------------------
-    if (file) {
-      file.println(jsonRow);
-      file.close();
-      Serial.println(jsonRow);
-    } else {
-      digitalWrite(issueLED, HIGH);
-      Serial.println(F("ERROR: Unable to open file."));
-    }
-
   } else {
     digitalWrite(dataLED, LOW);
   }
